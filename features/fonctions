@@ -1,0 +1,70 @@
+#!/bin/bash
+
+
+if [[ "${1}" = "--setup" ]]; then
+    EXIT=$"Return to Main Menu"
+else
+    EXIT=$"Exit"
+fi
+
+
+# use the first VT not dedicated to a running console
+LOG="/dev/tty6"
+
+# don't use /mnt because it's intended to mount other things there!
+if [[ -d /install ]]; then
+	echo "Install folder already exist"
+else
+	mkdir /install
+fi
+DESTDIR="/install"
+EDITOR=""
+_BLKID="blkid -c /dev/null"
+
+# name of kernel package
+KERNELPKG="linux"
+# name of the kernel image
+VMLINUZ="vmlinuz-${KERNELPKG}"
+# name of the initramfs filesystem
+INITRAMFS="initramfs-${KERNELPKG}"
+
+# abstract the common pacman args
+# #PACMAN="powerpill --root ${DESTDIR} --config /tmp/pacman.conf --noconfirm --noprogressbar"
+# PACMAN="pacman --root ${DESTDIR} --config /tmp/pacman.conf --noconfirm --noprogressbar"
+# downloader
+DLPROG="wget"
+PACKAGES=""
+
+NETWORK_ALIVE=`ping -c1 google.com 2>&1 | grep unknown`
+
+# destination of blockdevices in /sys
+block="/sys/block"
+
+# partitions
+PART_ROOT=""
+ROOTFS=""
+
+# Localization parameters
+LOCALE=$(get_country)
+KEYMAP=$(get_keyboard)
+KBLAYOUT=$(get_layout)
+
+# Mylex DAC960 PCI RAID controller, Compaq Next Generation Drive Array, 
+# Compaq Intelligent Drive Array
+EXTRA_CONTROLLER="rd cciss ida"
+
+# install stages
+S_SRC=0         # choose install medium
+S_NET=0         # network configuration
+S_CLOCK=0       # clock and timezone
+S_PART=0        # partitioning
+S_MKFS=0        # formatting
+S_MKFSAUTO=0    # auto fs part/formatting
+S_SELECT=0      # package selection
+S_INSTALL=0     # package installation
+S_CONFIG=0      # configuration editing
+S_GRUB=0       # using grub(2)
+
+# menu item tracker- autoselect the next item
+NEXTITEM=""
+

@@ -1,0 +1,294 @@
+#!/bin/bash
+
+# Get a list of available disks for use in the "Available disks" dialogs. This
+# will print the mountpoints as follows, getting size info from /sys:
+#   /dev/sda: 64000 MB
+#   /dev/sdb: 64000 MB
+
+block="/sys/block"
+# lists default linux dmraid devices
+dmraid_devices() {
+    if [[ -d /dev/mapper ]]; then
+        for fakeraid in $(dmraid -s -c); do
+                if [[ "$(echo ${fakeraid} | grep '_')" ]]; then
+                    echo "/dev/mapper/${fakeraid}"
+                    [[ "${1}" ]] && echo ${1}
+                fi
+        done
+    fi
+}
+
+# lists default linux partitionable raid devices
+partitionable_raid_devices() {
+    for dev in $(ls ${block} 2>/dev/null | egrep '^md'); do
+        for i in $(ls ${block}/${dev} 2>/dev/null | egrep "${dev}\!*p"); do 
+            if [[ -d "${block}/${dev}/${i}" ]]; then 
+                echo "/dev/${dev}"
+                [[ "${1}" ]] && echo ${1}
+                break
+            fi
+        done
+    done
+}
+
+# lists default linux blockdevices
+default_blockdevices() {
+    # ide devices
+    for dev in $(ls ${block} 2>/dev/null | egrep '^hd'); do
+        if [[ "$(cat ${block}/${dev}/device/media)" = "disk" ]]; then
+            if ! [[ "$(cat ${block}/${dev}/size)" = "0" ]]; then
+                if ! [[ "$(cat /proc/mdstat 2>/dev/null | grep "${dev}\[")" || "$(dmraid -rc | grep /dev/${dev})" ]]; then
+                    echo "/dev/${dev}"
+                    [[ "${1}" ]] && echo ${1}
+                fi
+            fi
+        fi
+    done
+    #scsi/sata devices, and virtio blockdevices (/dev/vd*)
+    for dev in $(ls ${block} 2>/dev/null | egrep '^[sv]d'); do
+        # virtio device doesn't have type file!
+        blktype="$(cat ${block}/${dev}/device/type 2>/dev/null)"
+        if ! [[ "${blktype}" = "5" ]]; then
+            if ! [[ "$(cat ${block}/${dev}/size)" = "0" ]]; then
+                if ! [[ "$(cat /proc/mdstat 2>/dev/null | grep "${dev}\[")" || "$(dmraid -rc | grep /dev/${dev})" ]]; then
+                    echo "/dev/${dev}"
+                    [[ "${1}" ]] && echo ${1}
+                fi
+            fi
+        fi
+    done
+}
+
+# lists additional linux blockdevices
+additional_blockdevices() {
+    # Include additional controllers:
+    # Mylex DAC960 PCI RAID controller, Compaq Next Generation Drive Array, 
+    # Compaq Intelligent Drive Array
+    for i in ${EXTRA_CONTROLLER}; do
+        for dev in $(ls ${block} 2>/dev/null | egrep "^${i}"); do
+            for k in $(ls ${block}/${dev} 2>/dev/null | egrep "${dev}*p"); do
+                if [[ -d "${block}/${dev}/${k}" ]]; then
+                    echo "/dev/${i}/$(echo ${dev} | sed -e 's#.*\!##g')"
+                    [[ "${1}" ]] && echo ${1}
+                    break
+                fi
+            done
+        done
+    done
+    # Include MMC devices
+    for dev in $(ls ${block} 2>/dev/null | egrep '^mmcblk'); do
+        for i in $(ls ${block}/${dev} 2>/dev/null | egrep ${dev}p); do 
+            if [[ -d "${block}/${dev}/${i}" ]]; then 
+                echo "/dev/${dev}"
+                [[ "${1}" ]] && echo ${1}
+                break
+            fi
+        done
+    done
+}
+finddisks() {
+    default_blockdevices ${1}
+    additional_blockdevices ${1}
+    #dmraid_devices ${1}
+    #partitionable_raid_devices ${1}
+}
+
+_getavaildisks()
+{
+    for i in $(finddisks); do
+            if [[ "$(echo "${i}" | grep '/dev/mapper')" ]]; then
+                # device mapper is always 512 aligned!
+                # only dmraid device can be here
+                echo -n "${i} : "; echo $(($(expr 512 '*' $(dmsetup status ${i} | cut -f2 -d " "))/1000000)) MB; echo "\n"
+            # special block devices
+            elif [[  "$(echo "${i}" | grep "/dev/rd")" ]]; then
+                echo -n "${i}: "; echo $(($(expr $(cat ${block}/rd\!$(basename ${i} | sed -e 's#p.*##g')/queue/logical_block_size) '*' $(cat ${block}/rd\!$(basename ${i} | sed -e 's#p.*##g')/size))/1000000)) MB; echo "\n"
+            elif [[  "$(echo "${i}" | grep "/dev/cciss")" ]]; then
+                echo -n "${i}: "; echo $(($(expr $(cat ${block}/cciss\!$(basename ${i} | sed -e 's#p.*##g')/queue/logical_block_size) '*' $(cat ${block}/cciss\!$(basename ${i} | sed -e 's#p.*##g')/size))/1000000)) MB; echo "\n"
+            elif [[  "$(echo "${i}" | grep "/dev/ida")" ]]; then
+                echo -n "${i}: "; echo $(($(expr $(cat ${block}/ida\!$(basename ${i} | sed -e 's#p.*##g')/queue/logical_block_size) '*' $(cat ${block}/ida\!$(basename ${i} | sed -e 's#p.*##g')/size))/1000000)) MB; echo "\n"
+            else
+                echo -n "${i} : "; echo $(($(expr $(cat ${block}/$(basename ${i})/queue/logical_block_size) '*' $(cat ${block}/$(basename ${i})/size))/1000000)) MB; echo "\n"
+            fi
+    done
+}
+
+# Disable swap and all mounted partitions for the destination system. Unmount
+# the destination root partition last!
+_umountall()
+{
+    DIALOG --infobox $"Disabling swapspace, unmounting already mounted disk devices..." 0 0
+    swapoff -a >/dev/null 2>&1
+    umount $(mount | grep -v "${DESTDIR} " | grep "${DESTDIR}" | sed 's|\ .*||g') >/dev/null 2>&1
+    umount $(mount | grep "${DESTDIR} " | sed 's|\ .*||g') >/dev/null 2>&1
+}
+
+# set device name scheme
+set_device_name_scheme() {
+    NAME_SCHEME_PARAMETER=""
+    NAME_SCHEME_LEVELS="FSUUID /dev/disk/by-uuid/<uuid> FSLABEL /dev/disk/by-label/<label> KERNEL /dev/<kernelname>"
+    DIALOG --menu $"Select the device name scheme you want to use in config files (recommended is UUID)." 11 50 5 ${NAME_SCHEME_LEVELS} 2>${ANSWER} || return 1
+    NAME_SCHEME_PARAMETER=$(cat ${ANSWER})
+    NAME_SCHEME_PARAMETER_RUN="1"
+}
+
+# _mkfs()
+# Create and mount filesystems in our destination system directory.
+#
+# args:
+#  domk: Whether to make the filesystem or use what is already there
+#  device: Device filesystem is on
+#  fstype: type of filesystem located at the device (or what to create)
+#  dest: Mounting location for the destination system
+#  mountpoint: Mount point inside the destination system, e.g. '/boot'
+
+# returns: 1 on failure
+_mkfs() {
+    local _domk=${1}
+    local _device=${2}
+    local _fstype=${3}
+    local _dest=${4}
+    local _mountpoint=${5}
+    local _labelname=${6}
+    local _fsoptions=${7}
+    local _btrfsdevices="$(echo ${8} | sed -e 's|#| |g')"
+    local _btrfslevel=${9}
+    local _btrfssubvolume=${10}
+    local _dosubvolume=${11}
+    local _btrfscompress=${12}
+    local _btrfsssd=${13}
+    # correct empty entries
+    [[ "${_fsoptions}" = "NONE" ]] && _fsoptions=""
+    [[ "${_btrfsssd}" = "NONE" ]] && _btrfsssd=""
+    [[ "${_btrfscompress}" = "NONE" ]] && _btrfscompress=""
+    [[ "${_btrfssubvolume}" = "NONE" ]] && _btrfssubvolume=""
+    # add btrfs raid level, if needed
+    [[ ! "${_btrfslevel}" = "NONE" && "${_fstype}" = "btrfs" ]] && _fsoptions="${_fsoptions} -d ${_btrfslevel}"
+    # we have two main cases: "swap" and everything else.
+    if [[ "${_fstype}" = "swap" ]]; then
+        swapoff ${_device} >/dev/null 2>&1
+        if [[ "${_domk}" = "yes" ]]; then
+            mkswap -L ${_labelname} ${_device} >${LOG} 2>&1
+            if [[ $? != 0 ]]; then
+                DIALOG --msgbox $"Error creating swap: mkswap ${_device}" 0 0
+                return 1
+            fi
+        fi
+        swapon ${_device} >${LOG} 2>&1
+        if [[ $? != 0 ]]; then
+            DIALOG --msgbox $"Error activating swap: swapon ${_device}" 0 0
+            return 1
+        fi
+    else
+        # make sure the fstype is one we can handle
+        local knownfs=0
+        for fs in xfs jfs reiserfs ext2 ext3 ext4 btrfs nilfs2 ntfs-3g vfat; do
+            [[ "${_fstype}" = "${fs}" ]] && knownfs=1 && break
+        done
+        if [[ ${knownfs} -eq 0 ]]; then
+            DIALOG --msgbox $"unknown fstype ${_fstype} for ${_device}" 0 0
+            return 1
+        fi
+        # if we were tasked to create the filesystem, do so
+        if [[ "${_domk}" = "yes" ]]; then
+            local ret
+            case ${_fstype} in
+                xfs)      mkfs.xfs ${_fsoptions} -L ${_labelname} -f ${_device} >${LOG} 2>&1; ret=$? ;;
+                jfs)      yes | mkfs.jfs ${_fsoptions} -L ${_labelname} ${_device} >${LOG} 2>&1; ret=$? ;;
+                reiserfs) yes | mkreiserfs ${_fsoptions} -l ${_labelname} ${_device} >${LOG} 2>&1; ret=$? ;;
+                ext2)     mkfs.ext2 -L ${_fsoptions} ${_labelname} ${_device} >${LOG} 2>&1; ret=$? ;;
+                ext3)     mke2fs ${_fsoptions} -L ${_labelname} -t ext3 ${_device} >${LOG} 2>&1; ret=$? ;;
+                ext4)     mke2fs ${_fsoptions} -L ${_labelname} -t ext4 ${_device} >${LOG} 2>&1; ret=$? ;;
+                btrfs)    mkfs.btrfs ${_fsoptions} -L ${_labelname} ${_btrfsdevices} >${LOG} 2>&1; ret=$? ;;
+                nilfs2)   mkfs.nilfs2 ${_fsoptions} -L ${_labelname} ${_device} >${LOG} 2>&1; ret=$? ;;
+                ntfs-3g)  mkfs.ntfs ${_fsoptions} -L ${_labelname} ${_device} >${LOG} 2>&1; ret=$? ;;
+                vfat)     mkfs.vfat ${_fsoptions} -n ${_labelname} ${_device} >${LOG} 2>&1; ret=$? ;;
+                # don't handle anything else here, we will error later
+            esac
+            if [[ ${ret} != 0 ]]; then
+                DIALOG --msgbox $"Error creating filesystem ${_fstype} on ${_device}" 0 0
+                return 1
+            fi
+            sleep 2
+        fi
+        if [[ "${_fstype}" = "btrfs" && -n "${_btrfssubvolume}" && "${_dosubvolume}" = "yes" ]]; then
+            create_btrfs_subvolume
+        fi
+        # btrfs_scan
+        sleep 2
+        # create our mount directory
+        mkdir -p ${_dest}${_mountpoint}
+        # prepare btrfs mount options
+        _btrfsmountoptions=""
+        [[ -n "${_btrfssubvolume}" ]] && _btrfsmountoptions="subvol=${_btrfssubvolume}"
+        [[ -n "${_btrfscompress}" ]] && _btrfsmountoptions="${_btrfsmountoptions} ${_btrfscompress}"
+        [[ -n "${_btrfsssd}" ]] && _btrfsmountoptions="${_btrfsmountoptions} ${_btrfsssd}"
+        _btrfsmountoptions="$(echo ${_btrfsmountoptions} | sed -e 's#^ ##g' | sed -e 's# #,#g')"
+        # mount the bad boy
+        if [[ "${_fstype}" = "btrfs" && -n "${_btrfsmountoptions}" ]]; then
+            mount -t ${_fstype} -o ${_btrfsmountoptions} ${_device} ${_dest}${_mountpoint} >${LOG} 2>&1
+        else
+            mount -t ${_fstype} ${_device} ${_dest}${_mountpoint} >${LOG} 2>&1
+        fi
+        if [[ $? != 0 ]]; then
+            DIALOG --msgbox $"Error mounting ${_dest}${_mountpoint}" 0 0
+            return 1
+        fi
+        # change permission of base directories to correct permission
+        # to avoid btrfs issues
+        if [[ "${_mountpoint}" = "/tmp" ]]; then
+            chmod 1777 ${_dest}${_mountpoint}
+        elif [[ "${_mountpoint}" = "/root" ]]; then
+            chmod 750 ${_dest}${_mountpoint}
+        else
+            chmod 755 ${_dest}${_mountpoint}
+        fi
+    fi
+    # add to .device-names for config files
+    local _fsuuid="$(getfsuuid ${_device})"
+    local _fslabel="$(getfslabel ${_device})"
+    
+    if [[ "${GUID_DETECTED}" == "1" ]]; then
+        local _partuuid="$(getpartuuid ${_device})"
+        local _partlabel="$(getpartlabel ${_device})"
+        
+        echo "# DEVICE DETAILS: ${_device} PARTUUID=${_partuuid} PARTLABEL=${_partlabel} UUID=${_fsuuid} LABEL=${_fslabel}" >> /tmp/.device-names
+    else
+        echo "# DEVICE DETAILS: ${_device} UUID=${_fsuuid} LABEL=${_fslabel}" >> /tmp/.device-names
+    fi
+
+    # add to temp fstab
+    if [[ "${NAME_SCHEME_PARAMETER}" == "FSUUID" ]]; then
+        if [[ -n "${_fsuuid}" ]]; then
+            _device="UUID=${_fsuuid}"
+        fi
+    elif [[ "${NAME_SCHEME_PARAMETER}" == "FSLABEL" ]]; then
+        if [[ -n "${_fslabel}" ]]; then
+            _device="LABEL=${_fslabel}"
+        fi
+    else
+        if [[ "${GUID_DETECTED}" == "1" ]]; then
+           if [[ "${NAME_SCHEME_PARAMETER}" == "PARTUUID" ]]; then
+               if [[ -n "${_partuuid}" ]]; then
+                   _device="PARTUUID=${_partuuid}"
+               fi
+           elif [[ "${NAME_SCHEME_PARAMETER}" == "PARTLABEL" ]]; then
+               if [[ -n "${_partlabel}" ]]; then
+                   _device="PARTLABEL=${_partlabel}"
+               fi
+           fi 
+        fi
+    fi
+    if [[ "${_fstype}" = "btrfs" && -n "${_btrfsmountoptions}" ]]; then
+        echo -n "${_device} ${_mountpoint} ${_fstype} defaults,${_btrfsmountoptions} 0 " >>/tmp/.fstab
+    else
+        echo -n "${_device} ${_mountpoint} ${_fstype} defaults 0 " >>/tmp/.fstab
+    fi
+    if [[ "${_fstype}" = "swap" ]]; then
+        echo "0" >>/tmp/.fstab
+    else
+        echo "1" >>/tmp/.fstab
+    fi
+}
+finddisks
+default_blockdevices

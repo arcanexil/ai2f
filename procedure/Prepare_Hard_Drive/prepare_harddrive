@@ -1,0 +1,58 @@
+#!/bin/bash
+TEXTDOMAIN=cli_installer
+
+ANSWER="/tmp/.prepare_harddrive"
+TITLE=$"Hard Drive Preparation"
+
+if [[ "${1}" = "--setup" ]]; then
+    EXIT=$"Return to Main Menu"
+else
+    EXIT=$"Exit"
+fi
+
+
+# DIALOG()
+# an el-cheapo dialog wrapper
+#
+# parameters: see dialog(1)
+# returns: whatever dialog did
+DIALOG() {
+    dialog --backtitle "${TITLE}" --aspect 15 "$@"
+    return $?
+}
+
+mainmenu() {
+        if [[ -n "${NEXTITEM}" ]]; then
+            DEFAULT="--default-item ${NEXTITEM}"
+        else
+            DEFAULT=""
+        fi
+        DIALOG ${DEFAULT} --backtitle "${TITLE}" --menu $"Prepare Hard Drive" 12 60 5 \
+            "1" $"Auto-Prepare (erases the ENTIRE hard drive)" \
+            "2" $"Partition Hard Drives (terminal) -- COMING SOON" \
+            "3" $"Set Filesystem Mountpoints -- COMING SOON" \
+            "4" "${EXIT}" 2>${ANSWER}
+            NEXTITEM="$(cat ${ANSWER})"
+        case $(cat ${ANSWER}) in
+            "1")
+                if [[ -e procedure/Prepare_Hard_Drive/autoprepare ]]; then
+                    sh procedure/Prepare_Hard_Drive/autoprepare --setup && NEXTITEM="4"
+                else
+                    DIALOG --msgbox $"Error:\nscript not found, aborting" 0 0
+                fi
+                ;;
+            "2")
+               # partition ;;
+               ;;
+            "3")
+                #PARTFINISH=""
+                #ASK_MOUNTPOINTS="1"
+                #mountpoints ;;
+                ;;
+        esac
+}
+        mainmenu
+
+
+clear
+exit 0

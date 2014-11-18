@@ -1,0 +1,353 @@
+#!/bin/bash
+
+#!/bin/bash
+TEXTDOMAIN=cli_installer
+source features/fonctions
+source features/functions
+ANSWER="/tmp/.configure_system"
+TITLE=$"System Configuration"
+
+# DIALOG()
+# an el-cheapo dialog wrapper
+#
+# parameters: see dialog(1)
+# returns: whatever dialog did
+DIALOG() {
+    dialog --backtitle "${TITLE}" --aspect 15 "$@"
+    return $?
+}
+
+# chroot_mount()
+# prepares target system as a chroot
+#
+chroot_mount()
+{
+    [[ -e "${DESTDIR}/sys" ]] || mkdir -m 555 "${DESTDIR}/sys"
+    [[ -e "${DESTDIR}/proc" ]] || mkdir -m 555 "${DESTDIR}/proc"
+    [[ -e "${DESTDIR}/dev" ]] || mkdir "${DESTDIR}/dev"
+    mount -t sysfs sysfs "${DESTDIR}/sys"
+    mount -t proc proc "${DESTDIR}/proc"
+    mount -o bind /dev "${DESTDIR}/dev"
+    chmod 555 "${DESTDIR}/sys"
+    chmod 555 "${DESTDIR}/proc"
+}
+
+# chroot_umount()
+# tears down chroot in target system
+#
+chroot_umount()
+{
+    umount "${DESTDIR}/proc"
+    umount "${DESTDIR}/sys"
+    umount "${DESTDIR}/dev"
+}
+
+# destdir_mounts()
+# check if PART_ROOT is set and if something is mounted on ${DESTDIR}
+destdir_mounts(){
+    # Don't ask for filesystem and create new filesystems
+    ASK_MOUNTPOINTS=""
+    PART_ROOT=""
+    # check if something is mounted on ${DESTDIR}
+    PART_ROOT="$(mount | grep "${DESTDIR} " | cut -d' ' -f 1)"
+    # Run mountpoints, if nothing is mounted on ${DESTDIR}
+    if [[ "${PART_ROOT}" = "" ]]; then
+        DIALOG --msgbox "Setup couldn't detect mounted partition(s) in ${DESTDIR}, please set mountpoints first." 0 0
+        ###################
+        ## MISSING POINT ##
+        ###################
+        mountpoints || return 1
+    fi
+}
+
+auto_fb() {
+    UVESAFB=""
+    # clean modprobe.conf file from options first
+    # sed -i -e '/options/d' ${DESTDIR}/etc/modprobe.d/modprobe.conf
+    # grep ^[a-z] /etc/modprobe.d/modprobe.conf >> ${DESTDIR}/etc/modprobe.d/modprobe.conf
+    if [[ -e ${DESTDIR}/lib/initcpio/hooks/v86d && "$(grep -w uvesafb /proc/cmdline)" ]]; then
+        UVESAFB="$(grep ^[a-z] /etc/modprobe.d/uvesafb.conf)" 
+        sed -i -e "s#options.*#${UVESAFB}#g" ${DESTDIR}/etc/modprobe.d/uvesafb.conf
+    fi
+}
+
+auto_parameters() {
+
+       
+    _set_locales
+
+
+    if [[ -s  /tmp/.timezone ]]; then
+        DIALOG --infobox $"Setting the timezone: $(cat /tmp/.timezone | sed -e 's/\..*//g') ..." 0 0
+        chroot ${DESTDIR} ln -s /usr/share/zoneinfo/$(cat /tmp/.timezone | sed -e 's/\..*//g') /etc/localtime
+            
+    fi
+
+}
+
+auto_ftpmirror() {
+    # /etc/pacman.d/mirrorlist
+    # add installer-selected mirror to the top of the mirrorlist
+    while [[ -f '/tmp/.rankmirrors' ]]; do
+        /bin/true
+    done;
+    mv /tmp/.mirrorlist "${DESTDIR}/etc/pacman.d/mirrorlist"
+}
+
+auto_timesetting() {
+    hwclock --systohc --utc
+    cp /etc/adjtime ${DESTDIR}/etc/adjtime
+}
+
+# geteditor()
+# prompts the user to choose an editor
+# sets EDITOR global variable
+#
+geteditor() {
+    if ! [[ "${EDITOR}" ]]; then
+        DIALOG --menu $"Select a Text Editor to Use" 10 35 3 \
+        "1" "nano (easier)" \
+        "2" "vi" 2>${ANSWER} || return 1
+        case $(cat ${ANSWER}) in
+            "1") EDITOR="nano" ;;
+            "2") EDITOR="vi" ;;
+        esac
+    fi
+}
+
+
+run_mkinitcpio() {
+    chroot_mount
+    # all mkinitcpio output goes to /tmp/mkinitcpio.log, which we tail into a dialog
+    ( \
+    touch /tmp/setup-mkinitcpio-running
+    echo "Progress ..." > /tmp/initramfs.log; echo >> /tmp/mkinitcpio.log
+    chroot ${DESTDIR} /usr/bin/mkinitcpio -p ${KERNELPKG} >>/tmp/mkinitcpio.log 2>&1
+    echo >> /tmp/mkinitcpio.log
+    rm -f /tmp/setup-mkinitcpio-running
+    ) &
+    sleep 2
+    dialog --backtitle "${TITLE}" --title $"Rebuilding  images ..." --no-kill --tailboxbg "/tmp/mkinitcpio.log" 18 70
+    while [[ -f /tmp/setup-mkinitcpio-running ]]; do
+        /bin/true
+    done
+    chroot_umount
+}
+
+configure_system() {
+    destdir_mounts || return 1
+    ## PREPROCESSING ##
+    # only done on first invocation of configure_system and redone on canceled configure system
+    if [[ ${S_CONFIG} -eq 0 ]]; then
+
+        # mkdir -p ${DESTDIR}/usr/share/antergos/
+        # cp /usr/share/antergos/antergos-menu.png ${DESTDIR}/usr/share/antergos/antergos-menu.png
+
+        auto_ftpmirror
+        auto_parameters
+        auto_fb
+        #auto_hwdetect
+    fi
+    ## END PREPROCESS ##
+    geteditor || return 1
+    FILE=""
+    CONTROL_HOSTNAME=0
+    CONTROL_USER=0
+
+
+    # chroot ${DESTDIR} systemctl enable ${DM_SELECTED}.service NetworkManager.service  >/dev/null 2>&1
+    if [[ -f /tmp/use_ntp ]];then
+        chroot ${DESTDIR} systemctl enable ntpd.service >/dev/null 2>&1
+    fi
+
+    if [[ -f /tmp/.openssh ]];then
+        chroot ${DESTDIR} systemctl enable sshd.service >/dev/null 2>&1
+    fi
+
+    chroot ${DESTDIR} systemctl enable dhcpcd.service >/dev/null 2>&1
+
+    cp -f /etc/pacman.conf ${DESTDIR}/etc/pacman.conf
+    # cp -f /etc/yaourtrc ${DESTDIR}/etc/yaourtrc
+
+
+
+    
+
+    while true; do
+        S_CONFIG=0
+
+        if [[ -n "${FILE}" ]]; then
+            DEFAULT="--default-item ${FILE}"
+        else
+            DEFAULT=""
+        fi
+        
+        DIALOG ${DEFAULT} --menu $"Configuration" 20 80 15 \
+                "Desktop-User"                  $"Create your user" \
+                "Hostname"                      $"Your computer's name" \
+                "Root-Password"                 $"Set the root password" \
+                "/etc/mkinitcpio.conf"          $"(Optional)" \
+                "Return"                        $"Return to Main Menu" 2>${ANSWER} || break
+    
+        
+        FILE="$(cat ${ANSWER})"
+        if [[ "${FILE}" = "Return" || -z "${FILE}" ]]; then       # exit
+            S_CONFIG=1
+            break
+
+        elif [[ "${FILE}" = "Desktop-User" ]]; then
+            USER_NAME_TMP=""
+            USER_NAME=""
+            USER_PASSWORD=""
+            USER_FULL_NAME=""
+
+            if [[ "${CONTROL_USER}" = 0 ]]; then
+
+                while [[ "${USER_NAME_TMP}" = "" ]]; do
+                    DIALOG --inputbox $"Enter your user name (no spaces):" 9 40 2>${ANSWER} || return 1
+                    USER_NAME_TMP=$(cat ${ANSWER})
+                    USER_NAME=${USER_NAME_TMP,,}
+                    # rm -f ${DESTDIR}/etc/sudoers
+                    # echo "${USER_NAME} ALL=(ALL) ALL" >> ${DESTDIR}/etc/sudoers.d/installer
+                    # chmod 440 ${DESTDIR}/etc/sudoers.d/installer
+
+                    DIALOG --inputbox $"Enter your full name:" 9 40 2>${ANSWER} || return 1
+                    USER_FULL_NAME=$(cat ${ANSWER})
+                    
+                done
+
+                while [[ "${USER_PASSWORD}" = "" ]]; do
+                        DIALOG --insecure --passwordbox $"Enter your user password:" 0 0 2>${ANSWER} || return 1
+                        PASS=$(cat ${ANSWER})
+                        DIALOG --insecure --passwordbox $"Retype your user password:" 0 0 2>${ANSWER} || return 1
+                        PASS2=$(cat ${ANSWER})
+                        if [[ "${PASS}" = "${PASS2}" ]]; then
+                            USER_PASSWORD=${PASS}
+                            echo ${USER_PASSWORD} > /tmp/.user_password
+                            echo ${USER_PASSWORD} >> /tmp/.user_password
+                            USER_PASSWORD=/tmp/.user_password
+                        else
+                         DIALOG --msgbox $"Password didn't match, please enter again." 0 0
+                        fi
+                done
+
+                DIALOG --infobox $"Creating user..." 4 30
+
+                chroot ${DESTDIR} useradd -m -s /bin/bash -g users -G lp,video,network,storage,wheel,audio ${USER_NAME} >/dev/null 2>&1
+                chroot ${DESTDIR} passwd ${USER_NAME} < /tmp/.user_password >/dev/null 2>&1
+                chroot ${DESTDIR} chfn -f "${USER_FULL_NAME}" "${USER_NAME}" >/dev/null 2>&1
+                
+                rm /tmp/.user_password
+
+
+                CONTROL_USER=1
+            else
+                DIALOG --msgbox $"User has already been created" 6 35
+            fi
+
+        elif [[ "${FILE}" = "Hostname" ]]; then
+            HOSTNAME=""
+
+            if [[ "${CONTROL_HOSTNAME}" = 0 ]];then
+
+                while [[ "${HOSTNAME}" = "" ]]; do
+                    DIALOG --inputbox $"Enter your computer's name:" 0 0 2>${ANSWER} || return 1
+                    HOSTNAME=$(cat ${ANSWER})
+                    if [[ ! -f ${DESTDIR}/etc/hostname ]]; then
+                        echo ${HOSTNAME} > ${DESTDIR}/etc/hostname
+                    fi
+                done 
+                CONTROL_HOSTNAME=1
+            else       
+                DIALOG --msgbox $"Hostname has already been set up" 6 40
+            fi
+
+
+        elif [[ "${FILE}" = "/etc/mkinitcpio.conf" ]]; then    # non-file
+            
+            DIALOG --msgbox $"The mkinitcpio.conf file controls which modules will be placed into the initramfs for your system's kernel.\n\n- Non US keymap users should add 'keymap' to HOOKS= array\n- USB keyboard users should add 'usbinput' to HOOKS= array\n- If you install under VMWARE add 'BusLogic' to MODULES= array\n- raid, lvm2, encrypt are not enabled by default\n- 2 or more disk controllers, please specify the correct module\n  loading order in MODULES= array \n\nMost of you will not need to change anything in this file." 18 70
+            HOOK_ERROR=""
+            ${EDITOR} ${DESTDIR}${FILE}
+            for i in $(cat ${DESTDIR}/etc/mkinitcpio.conf | grep ^HOOKS | sed -e 's/"//g' -e 's/HOOKS=//g'); do
+                [[ -e ${DESTDIR}/usr/lib/initcpio/install/${i} ]] || HOOK_ERROR=1
+            done
+            if [[ "${HOOK_ERROR}" = "1" ]]; then
+                DIALOG --msgbox $"ERROR: Detected error in 'HOOKS=' line, please correct HOOKS= in /etc/mkinitcpio.conf!" 18 70
+            fi
+
+
+        elif [[ "${FILE}" = "Root-Password" ]]; then            # non-file
+            PASSWORD=""
+            while [[ "${PASSWORD}" = "" ]]; do
+                DIALOG --insecure --passwordbox $"Enter root password:" 0 0 2>${ANSWER} || return 1
+                PASS=$(cat ${ANSWER})
+                DIALOG --insecure --passwordbox $"Retype root password:" 0 0 2>${ANSWER} || return 1
+                PASS2=$(cat ${ANSWER})
+                if [[ "${PASS}" = "${PASS2}" ]]; then
+                    PASSWORD=${PASS}
+                    echo ${PASSWORD} > /tmp/.password
+                    echo ${PASSWORD} >> /tmp/.password
+                    PASSWORD=/tmp/.password
+                else
+                    DIALOG --msgbox $"Password didn't match, please enter again." 0 0
+                fi
+            done
+            chroot ${DESTDIR} passwd root < /tmp/.password
+            rm /tmp/.password
+        else                                                #regular file
+            ${EDITOR} ${DESTDIR}${FILE}
+        fi
+    done
+    if [[ ${S_CONFIG} -eq 1 ]]; then
+
+        ###### USER CONFIGURATIONS  #####
+
+
+        ## Copy locales
+        cp -f /tmp/locale.gen ${DESTDIR}/etc/locale.gen
+
+        # only done on normal exit of configure menu
+        ## POSTPROCESSING ##
+        # adjust time
+        auto_timesetting
+
+        # /etc/initcpio.conf
+        # Fix deprecated hooks
+        # sed -i 's/ pata//' ${DESTDIR}/etc/mkinitcpio.conf
+        # sed -i 's/ scsi//' ${DESTDIR}/etc/mkinitcpio.conf
+        # sed -i 's/ sata//' ${DESTDIR}/etc/mkinitcpio.conf
+        sed -i 's/usbinput/keyboard/' ${DESTDIR}/etc/mkinitcpio.conf
+        run_mkinitcpio
+        
+        # /etc/locale.gen
+        sleep 2
+        DIALOG --infobox $"Generating locales..." 4 25
+        cp -f /tmp/locale.conf ${DESTDIR}/etc/locale.conf
+        arch-chroot ${DESTDIR} locale-gen >/dev/null 2>&1
+
+        # Add loadkeys preferences
+        arch-chroot ${DESTDIR} echo "KEYMAP=" . arch-chroot ${DESTDIR} locale | grep '[a-z]' | cut -c '6-7' | head -n1 > /etc/vconsole.conf
+        #arch-chroot ${DESTDIR} localectl set-keymap $(locale | grep '[a-z]' | cut -c '6-7' | head -n1)
+
+        # Fix grub locale error
+        # chroot ${DESTDIR} cp "/boot/grub/locale/en@quot.mo" "/boot/grub/locale/$(echo ${LOCALE}|cut -b 1-2).mo.gz"
+
+        # Fix QT apps
+        echo 'export GTK2_RC_FILES="$HOME/.gtkrc-2.0"' >> ${DESTDIR}/etc/bash.bashrc
+
+
+        # Fix multilib repo in last release
+        cp -f /etc/pacman.conf ${DESTDIR}/etc/pacman.conf
+
+        if [[ $(uname -m) = 'x86_64' ]];then
+            echo "" >> ${DESTDIR}/etc/pacman.conf
+            echo "[multilib]" >> ${DESTDIR}/etc/pacman.conf
+            echo "SigLevel = PackageRequired" >> ${DESTDIR}/etc/pacman.conf
+            echo "Include = /etc/pacman.d/mirrorlist" >> ${DESTDIR}/etc/pacman.conf
+        fi
+
+
+        ## END POSTPROCESSING ##
+    fi
+}
+configure_system

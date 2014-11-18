@@ -1,0 +1,1 @@
+Setting up welcome menu, root access, rankmirror script

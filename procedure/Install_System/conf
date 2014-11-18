@@ -1,0 +1,97 @@
+#!/bin/bash
+# pacman_conf()
+# creates temporary pacman.conf file
+pacman_conf() {
+
+        if [[ $(uname -m) = 'i686' ]];then
+    cat << EOF > /tmp/pacman.conf
+[options]
+Architecture = auto
+SigLevel = PackageOptional
+CacheDir = ${DESTDIR}/var/cache/pacman/pkg
+CacheDir = /packages/core-$(uname -m)/pkg
+CacheDir = /packages/core-any/pkg
+
+
+[core]
+SigLevel = PackageRequired
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+SigLevel = PackageRequired
+Include = /etc/pacman.d/mirrorlist
+
+[community]
+SigLevel = PackageRequired
+Include = /etc/pacman.d/mirrorlist
+
+
+EOF
+
+        else
+            cat << EOF > /tmp/pacman.conf
+[options]
+Architecture = auto
+SigLevel = PackageOptional
+CacheDir = ${DESTDIR}/var/cache/pacman/pkg
+CacheDir = /packages/core-$(uname -m)/pkg
+CacheDir = /packages/core-any/pkg
+
+
+[core]
+SigLevel = PackageRequired
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+SigLevel = PackageRequired
+Include = /etc/pacman.d/mirrorlist
+
+[community]
+SigLevel = PackageRequired
+Include = /etc/pacman.d/mirrorlist
+
+[multilib]
+SigLevel = PackageRequired
+Include = /etc/pacman.d/mirrorlist
+
+EOF
+
+        fi
+
+}
+
+# pacman needs a masterkey before checking signed packages
+prepare_pacman_keychain() {
+    if ! [[ -d ${DESTDIR}/etc/pacman.d/gnupg ]]; then
+        cp -ar /etc/pacman.d/gnupg ${DESTDIR}/etc/pacman.d 2>&1
+    fi
+}
+
+# configures pacman and syncs db on destination system
+# params: none
+# returns: 1 on error
+prepare_pacman() {
+    local _state_sync=''
+    local _arch=`uname -m`
+    local PACMAN_SYNC_LOG='/tmp/pacman-sync.log'
+
+    # Set up the necessary directories for pacman use
+    [[ ! -d "${DESTDIR}/var/cache/pacman/pkg" ]] && mkdir -m 755 -p "${DESTDIR}/var/cache/pacman/pkg"
+    [[ ! -d "${DESTDIR}/var/lib/pacman" ]] && mkdir -m 755 -p "${DESTDIR}/var/lib/pacman"
+    prepare_pacman_keychain
+
+    while [[ "${_state_sync}" != 'complete' ]];do
+        DIALOG --infobox $"Refreshing package database..." 6 45
+        ${PACMAN} -Sy >${LOG} 2>${PACMAN_SYNC_LOG} || return 1
+        if [[ $? -ne 0 ]]; then
+            DIALOG --msgbox $"Pacman preparation failed! Check ${LOG} for errors." 6 60
+            return 1
+        fi
+        if [[ `grep error ${PACMAN_SYNC_LOG}` ]];then
+            _state_sync='missing'
+        else
+            _state_sync='complete'
+        fi
+    done
+    return 0
+}

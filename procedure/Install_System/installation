@@ -1,0 +1,320 @@
+#!/bin/bash
+TEXTDOMAIN=cli_installer
+source procedure/Install_System/conf
+source features/functions
+source features/fonctions
+ANSWER="/tmp/.installation"
+TITLE=$"System Installation"
+
+# DIALOG()
+# an el-cheapo dialog wrapper
+#
+# parameters: see dialog(1)
+# returns: whatever dialog did
+DIALOG() {
+    dialog --backtitle "${TITLE}" --aspect 15 "$@"
+    return $?
+}
+
+# select_packages()
+# prompts the user to select packages to install
+#
+# params: none
+# returns: 1 on error
+select_packages() {
+    # pacman_conf
+    # prepare_pacman
+    
+        # if selection has been done before, warn about loss of input
+        # and let the user exit gracefully
+        if [[ ${S_SELECT} -ne 0 ]]; then
+            DIALOG --yesno $"WARNING: Running this stage again will result in the loss of previous package selections.\n\nDo you wish to continue?" 10 50 || return 1
+        fi
+
+        local _pkglist=()
+        : >/tmp/package-process.log
+        # display pkglist output while it's running
+    
+
+
+  
+    # Add packages which are not in core repository
+    if [[ "$(grep -w uvesafb /proc/cmdline)" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w v86d)" ]] && PACKAGES="${PACKAGES} v86d"
+    fi
+
+
+    if [[ "${DESKTOP_SELECTED}" == 'b' ]];then
+        PACKAGES="${PACKAGES} base syslinux"
+        #DM_SELECTED='gdm'
+    elif [[ "${DESKTOP_SELECTED}" == 'bbd' ]];then
+        PACKAGES="${PACKAGES} base base-devel syslinux"
+        #DM_SELECTED='lxdm'
+    elif [[ "${DESKTOP_SELECTED}" == 'bo' ]];then
+        PACKAGES="${PACKAGES} base openssh syslinux"
+        mkdir /tmp/.openssh
+        #DM_SELECTED='lxdm'
+    elif [[ "${DESKTOP_SELECTED}" == 'bbdo' ]];then
+        PACKAGES="${PACKAGES} base base-devel openssh syslinux"
+        mkdir /tmp/.openssh
+        #DM_SELECTED='kdm'
+    fi
+
+    
+    if [[ -f /tmp/use_ntp ]];then
+        PACKAGES="${PACKAGES} ntp"
+    fi
+
+    if [[ -e /var/state/dhcp/dhclient.leases ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w dhclient)" ]] && PACKAGES="${PACKAGES} dhclient"
+    fi
+    # Add filesystem packages
+    if [[ "$(${_BLKID} -o value -s TYPE | grep ntfs)" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w ntfs-3g)" ]] && PACKAGES="${PACKAGES} ntfs-3g"
+    fi
+    if [[ "$(${_BLKID} -o value -s TYPE | grep btrfs)" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w btrfs-progs)" ]] && PACKAGES="${PACKAGES} btrfs-progs"
+    fi
+    if [[ "$(${_BLKID} -o value -s TYPE | grep nilfs2)" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w nilfs-utils)" ]] && PACKAGES="${PACKAGES} nilfs-utils"
+    fi
+    if [[ "$(${_BLKID} -o value -s TYPE | grep ext)" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w e2fsprogs)" ]] && PACKAGES="${PACKAGES} e2fsprogs"
+    fi
+    if [[ "$(${_BLKID} -o value -s TYPE | grep reiserfs)" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w reiserfsprogs)" ]] && PACKAGES="${PACKAGES} reiserfsprogs"
+    fi
+    if [[ "$(${_BLKID} -o value -s TYPE | grep xfs)" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w xfsprogs)" ]] && PACKAGES="${PACKAGES} xfsprogs"
+    fi
+    if [[ "$(${_BLKID} -o value -s TYPE | grep jfs)" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w jfsutils)" ]] && PACKAGES="${PACKAGES} jfsutils"
+    fi
+    if [[ "$(${_BLKID} -o value -s TYPE | grep vfat)" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w dosfstools)" ]] && PACKAGES="${PACKAGES} dosfstools"
+    fi
+    if ! [[ "$(dmraid_devices)" = "" ]]; then
+        ! [[ "$(echo ${PACKAGES} | grep -w dmraid)" ]] && PACKAGES="${PACKAGES} dmraid"
+    fi
+
+    # Install chinese fonts
+    if [ "$LOCALE" = 'zh_TW' ] || [ "$LOCALE" = 'zh_CN' ];then
+        PACKAGES="${PACKAGES} opendesktop-fonts"
+    fi
+
+    S_SELECT=1
+    install_packages
+
+
+}
+
+# destdir_mounts()
+# check if PART_ROOT is set and if something is mounted on ${DESTDIR}
+destdir_mounts(){
+    # Don't ask for filesystem and create new filesystems
+    ASK_MOUNTPOINTS=""
+    PART_ROOT=""
+    # check if something is mounted on ${DESTDIR}
+    PART_ROOT="$(mount | grep "${DESTDIR} " | cut -d' ' -f 1)"
+    # Run mountpoints, if nothing is mounted on ${DESTDIR}
+    if [[ "${PART_ROOT}" = "" ]]; then
+        DIALOG --msgbox "Setup couldn't detect mounted partition(s) in ${DESTDIR}, please set mountpoints first." 0 0
+        ###################
+        ## MISSING POINT ##
+        ###################
+        mountpoints || return 1 
+    fi
+}
+
+# chroot_mount()
+# prepares target system as a chroot
+#
+chroot_mount()
+{
+    mount -t proc proc "${DESTDIR}/proc/"
+    mount -t sysfs sys "${DESTDIR}sys/"
+    mount -o bind /dev "${DESTDIR}/dev/"
+    mount -t devpts pts "${DESTDIR}/dev/pts/"
+    # chmod 555 "${DESTDIR}/sys"
+    # chmod 555 "${DESTDIR}/proc"
+}
+
+# chroot_umount()
+# tears down chroot in target system
+#
+chroot_umount()
+{
+    umount "${DESTDIR}/{proc,sys,dev/pts,dev}"
+}
+
+# Set PACKAGES parameter before running to install wanted packages
+run_pacman(){
+    local _result=''
+    local _check=''
+    # create chroot environment on target system
+    # code straight from mkarchroot
+    #chroot_mount
+
+    # execute pacman in a subshell so we can follow its progress
+    # pacman output goes /tmp/pacman.log
+    # /tmp/setup-pacman-running acts as a lockfile
+# pacstrap ${DESTDIR} ${PACKAGES} >>/tmp/pacman.log 2>&1 >> /tmp/pacman.log 
+# sleep 2
+# dialog --backtitle "${TITLE}" --title $" Installing... Please Wait " --no-kill --tailboxbg "/tmp/pacman.log" 18 70 2>${ANSWER}
+    while [[ "${_result}" != 'Installation Complete' ]];do
+        ( \
+            echo "Installing Packages..." >/tmp/pacman.log ; \
+            echo >>/tmp/pacman.log ; \
+            touch /tmp/setup-pacman-running ; \
+            pacstrap ${DESTDIR} ${PACKAGES} >>/tmp/pacman.log 2>&1 >> /tmp/pacman.log ; \
+            echo $? > /tmp/.pacman-retcode ; \
+            if [[ $(cat /tmp/.pacman-retcode) -ne 0 ]]; then
+                echo -e "\nPackage Installation FAILED." >>/tmp/pacman.log
+            else
+                echo -e "\nPackage Installation Complete." >>/tmp/pacman.log
+            fi
+            rm /tmp/setup-pacman-running
+        ) &
+
+        # display pacman output while it's running
+        sleep 2
+        dialog --backtitle "${TITLE}" --title $" Installing... Please Wait " \
+            --no-kill --tailboxbg "/tmp/pacman.log" 18 70 2>${ANSWER}
+        while [[ -f /tmp/setup-pacman-running ]]; do
+            /bin/true
+        done
+        kill $(cat ${ANSWER})
+
+        # pacman finished, display scrollable output
+        local _result=''
+        local _check=''
+        if [[ $(cat /tmp/.pacman-retcode) -ne 0 ]]; then
+            _result=$"Installation Failed."
+        else
+            _result=$"Installation Complete"
+            _check='installed'
+        fi
+        rm /tmp/.pacman-retcode
+
+        if [[ "${_check}" = 'installed' ]];then
+            DIALOG --msgbox "${_result}" 8 50 || return 1
+        else
+            DIALOG --msgbox "${_result}" 15 60 || return 1
+            prepare_pacman
+
+        fi
+    done
+    #ensure the disk is synced
+    sync
+    #chroot_umount
+}
+
+# auto_fstab()
+# preprocess fstab file
+# comments out old fields and inserts new ones
+# according to partitioning/formatting stage
+#
+auto_fstab(){
+    # Modify fstab
+    if [[ "${S_MKFS}" = "1" || "${S_MKFSAUTO}" = "1" ]]; then
+        if [[ -f /tmp/.device-names ]]; then
+            sort /tmp/.device-names >>${DESTDIR}/etc/fstab
+        fi
+        if [[ -f /tmp/.fstab ]]; then
+            # clean fstab first from /dev entries
+            sed -i -e '/^\/dev/d' ${DESTDIR}/etc/fstab
+            sort /tmp/.fstab >>${DESTDIR}/etc/fstab
+        fi
+    fi
+}
+
+# auto_mdadm()
+# add mdadm setup to existing /etc/mdadm.conf
+auto_mdadm()
+{
+    if [[ -e ${DESTDIR}/etc/mdadm.conf ]];then
+        if [[ -e /proc/mdstat ]];then
+            if [[ "$(cat /proc/mdstat | grep ^md)" ]]; then
+                DIALOG --infobox $"Adding raid setup to ${DESTDIR}/etc/mdadm.conf ..." 4 40
+                mdadm -Ds >> ${DESTDIR}/etc/mdadm.conf
+            fi
+        fi
+    fi
+}
+
+auto_luks() {
+    # remove root device from crypttab
+    if [[ -e /tmp/.crypttab && "$(grep -v '^#' ${DESTDIR}/etc/crypttab)"  = "" ]]; then
+        # add to temp crypttab
+        sed -i -e "/^$(basename ${PART_ROOT}) /d" /tmp/.crypttab
+        cat /tmp/.crypttab >> ${DESTDIR}/etc/crypttab
+    fi
+}
+
+# install_packages()
+# performs package installation to the target system
+#
+install_packages() {
+    destdir_mounts || return 1
+    if [[ "${MODE}" = "media" ]]; then
+        if [[ "${PACKAGES}" = "" || "${S_SELECT}" != "1" ]]; then
+            DIALOG --msgbox "Error:\nSomething went wrong, please retry or update ai2f." 0 0
+            select_packages || return 1
+        fi
+    else
+        if [[ "${S_SELECT}" != "1" ]]; then
+            DIALOG --msgbox "Error:\nSomething went wrong, please retry or update ai2f." 0 0
+            select_packages || return 1
+        fi
+    fi
+    if [[ "${S_MKFS}" != "1" && "${S_MKFSAUTO}" != "1" ]]; then
+        getdest
+    fi
+    DIALOG --msgbox $"Package installation will begin now.  You can watch the output in the progress window. Please be patient." 0 0
+    run_pacman
+    S_INSTALL=1
+    chroot_mount
+    # automagic time!
+    # any automatic configuration should go here
+
+
+    DIALOG --infobox $"Writing base configuration..." 6 40
+    #auto_addons
+    auto_fstab
+    auto_mdadm
+    auto_luks
+
+    # tear down the chroot environment
+    chroot_umount
+    # Setting up syslinux boot loader
+    DIALOG --infobox $"Writing syslinux configuration..." 6 40
+    sleep 2
+    umount ${DESTDIR}/{proc,sys,dev/pts,dev}
+    arch-chroot ${DESTDIR} syslinux-install_update -iam >/dev/null 2>/tmp/.syslinux.log
+}
+
+mainmenu(){
+
+    DESKTOP_SELECTED=""
+    DM_SELECTED=''
+
+    while [[ "${DESKTOP_SELECTED}" = "" ]]; do
+
+        DIALOG --menu $"Select an installation sequence :" 0 0 0 \
+        "1" "base" \
+        "2" "base + base-devel" \
+        "3" "base + openssh" \
+        "4" "base + base-devel + openssh"\
+        "5" "${EXIT}" 2>${ANSWER} || return 1
+        case $(cat ${ANSWER}) in
+            "1") DESKTOP_SELECTED="b" ;;
+            "2") DESKTOP_SELECTED="bbd" ;;
+            "3") DESKTOP_SELECTED="bo" ;;
+            "4") DESKTOP_SELECTED="bbdo" ;;
+            "5") #EXIT
+                ;;
+        esac
+    done
+}
+mainmenu
+select_packages
